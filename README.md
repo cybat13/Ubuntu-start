@@ -18,7 +18,7 @@ Lightweight Ubuntu setup script for gaming, dev tools, Vulkan, GameMode, MangoHu
 
 ### Safer method: clone the repo
 ```bash
-git clone https://github.com/YOUR_USERNAME/ubuntu-lite-gaming.git
-cd ubuntu-lite-gaming
+git clone https://github.com/cybat13/Ubuntu-start.git
+cd Ubuntu-start
 chmod +x install.sh
 ./install.sh
