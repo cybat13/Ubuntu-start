@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-trap 'printf "[ERROR] Line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
+trap 'rc=$?; printf "[ERROR] Line %s: %s (exit %s)\n" "$LINENO" "$BASH_COMMAND" "$rc" >&2; exit "$rc"' ERR
 
 #######################################
 # Constants / defaults
@@ -11,12 +11,14 @@ readonly SCRIPT_NAME="$(basename "$0")"
 readonly SYSCTL_FILE="/etc/sysctl.d/99-ubuntu-gaming.conf"
 readonly LOCAL_BIN_DIR="${HOME}/.local/bin"
 readonly LOCAL_CONFIG_DIR="${HOME}/.config"
-readonly MANGOHUD_CONFIG_FILE="${LOCAL_CONFIG_DIR}/MangoHud/MangoHud.conf"
+readonly MANGOHUD_CONFIG_DIR="${LOCAL_CONFIG_DIR}/MangoHud"
+readonly MANGOHUD_CONFIG_FILE="${MANGOHUD_CONFIG_DIR}/MangoHud.conf"
 
 APT_ENV=(DEBIAN_FRONTEND=noninteractive)
 APT_INSTALL_OPTS=(-y --no-install-recommends)
 APT_UPGRADE_OPTS=(-y)
-APT_RETRIES=3
+APT_FIX_OPTS=(-y)
+APT_RETRY_OPTS=(-o Acquire::Retries=3)
 
 DO_UPDATE=1
 DO_MICROCODE=1
@@ -38,7 +40,11 @@ MINIMAL_MODE=0
 DRY_RUN=0
 ASSUME_YES=0
 
+CPU_VENDOR="unknown"
 GPU_INFO=""
+GPU_HAS_NVIDIA=0
+GPU_HAS_AMD=0
+GPU_HAS_INTEL=0
 
 #######################################
 # Package groups
@@ -130,6 +136,7 @@ POWER_PACKAGES=(
 #######################################
 
 log()  { printf "\n==> %s\n" "$1"; }
+info() { printf "[INFO] %s\n" "$1"; }
 warn() { printf "[WARN] %s\n" "$1" >&2; }
 die()  { printf "[ERROR] %s\n" "$1" >&2; exit 1; }
 
@@ -162,6 +169,16 @@ confirm() {
       *) printf 'Please answer y or n.\n' ;;
     esac
   done
+}
+
+run() {
+  if [ "$DRY_RUN" -eq 1 ]; then
+    printf '[DRY-RUN] '
+    printf '%q ' "$@"
+    printf '\n'
+  else
+    "$@"
+  fi
 }
 
 run_sudo() {
@@ -198,6 +215,23 @@ have_pkg() {
   [ -n "$candidate" ] && [ "$candidate" != "(none)" ]
 }
 
+path_contains_dir() {
+  printf '%s\n' "$PATH" | tr ':' '\n' | grep -Fxq "$1"
+}
+
+ensure_user_dir() {
+  mkdir -p "$1"
+}
+
+service_exists() {
+  systemctl list-unit-files "$1" >/dev/null 2>&1
+}
+
+has_multiverse_enabled() {
+  grep -RhsE '^[[:space:]]*deb .* multiverse([[:space:]]|$)' \
+    /etc/apt/sources.list /etc/apt/sources.list.d/*.list 2>/dev/null
+}
+
 apt_cmd() {
   if [ "$DRY_RUN" -eq 1 ]; then
     printf '[DRY-RUN] sudo env DEBIAN_FRONTEND=noninteractive apt-get '
@@ -206,18 +240,7 @@ apt_cmd() {
     return 0
   fi
 
-  local attempt
-  local rc=0
-  for attempt in $(seq 1 "$APT_RETRIES"); do
-    if sudo env "${APT_ENV[@]}" apt-get "$@"; then
-      return 0
-    fi
-    rc=$?
-    warn "apt-get failed (attempt ${attempt}/${APT_RETRIES}): apt-get $*"
-    [ "$attempt" -lt "$APT_RETRIES" ] && sleep 3
-  done
-
-  return "$rc"
+  sudo env "${APT_ENV[@]}" apt-get "${APT_RETRY_OPTS[@]}" "$@"
 }
 
 apt_install() {
@@ -233,7 +256,7 @@ install_if_available() {
     if ! have_pkg "$pkg"; then
       warn "Package unavailable: $pkg"
     elif is_installed "$pkg"; then
-      log "Already installed: $pkg"
+      info "Already installed: $pkg"
     else
       to_install+=("$pkg")
     fi
@@ -260,8 +283,8 @@ write_file_with_mode() {
   local mode="$1"
   local target="$2"
   local tmp
-
   tmp="$(mktemp)"
+
   cat > "$tmp"
 
   if [ "$DRY_RUN" -eq 1 ]; then
@@ -274,19 +297,51 @@ write_file_with_mode() {
   rm -f "$tmp"
 }
 
+write_if_changed() {
+  local mode="$1"
+  local target="$2"
+  local tmp
+  tmp="$(mktemp)"
+
+  cat > "$tmp"
+
+  if [ "$DRY_RUN" -eq 1 ]; then
+    printf '[DRY-RUN] compare and maybe install -m %s %s %s\n' "$mode" "$tmp" "$target"
+    rm -f "$tmp"
+    return 0
+  fi
+
+  if [ -f "$target" ] && cmp -s "$tmp" "$target"; then
+    info "Already up to date: $target"
+    rm -f "$tmp"
+    return 0
+  fi
+
+  install -D -m "$mode" "$tmp" "$target"
+  rm -f "$tmp"
+}
+
+warn_if_local_bin_missing_from_path() {
+  if ! path_contains_dir "$LOCAL_BIN_DIR"; then
+    warn "~/.local/bin is not in PATH for this shell"
+    warn "Add this to ~/.bashrc or ~/.zshrc:"
+    warn 'export PATH="$HOME/.local/bin:$PATH"'
+  fi
+}
+
 #######################################
 # Usage / args
 #######################################
 
 print_usage() {
-  cat <<EOF_USAGE
+  cat <<EOF
 Usage:
   $SCRIPT_NAME [options]
 
 Options:
   --dry-run              Show what would run, but do not make changes
   --yes                  Auto-confirm all prompts
-  --no-confirm           Disable confirmations (same effect as --yes)
+  --no-confirm           Disable confirmations
   --minimal              Install a smaller core set only
   --full                 Enable all default sections
   --no-update            Skip apt update/upgrade
@@ -295,7 +350,7 @@ Options:
   --skip-i386            Skip enabling i386 architecture
   --skip-graphics        Skip Mesa/Vulkan userspace packages
   --skip-gaming          Skip Steam/Lutris/Wine/GameMode/MangoHud
-  --skip-gaming-tools    Skip additional gaming tools (gamescope, vkbasalt, etc.)
+  --skip-gaming-tools    Skip extra gaming tools
   --skip-devtools        Skip developer tools
   --skip-extras          Skip useful extras
   --skip-power           Skip power-profiles-daemon and helper scripts
@@ -310,30 +365,30 @@ Examples:
   ./$SCRIPT_NAME --dry-run
   ./$SCRIPT_NAME --yes --skip-nvidia
   ./$SCRIPT_NAME --minimal --skip-gaming-tools
-EOF_USAGE
+EOF
 }
 
 parse_args() {
   while [ $# -gt 0 ]; do
     case "$1" in
-      --dry-run)          DRY_RUN=1 ;;
-      --yes|--no-confirm) ASSUME_YES=1; DO_CONFIRM=0 ;;
-      --minimal)          MINIMAL_MODE=1 ;;
-      --full)             MINIMAL_MODE=0 ;;
-      --no-update)        DO_UPDATE=0 ;;
-      --skip-microcode)   DO_MICROCODE=0 ;;
-      --skip-nvidia)      DO_NVIDIA=0 ;;
-      --skip-i386)        DO_I386=0 ;;
-      --skip-graphics)    DO_GRAPHICS=0 ;;
-      --skip-gaming)      DO_GAMING=0 ;;
-      --skip-gaming-tools) DO_GAMING_TOOLS=0 ;;
-      --skip-devtools)    DO_DEVTOOLS=0 ;;
-      --skip-extras)      DO_EXTRAS=0 ;;
-      --skip-power)       DO_POWER=0 ;;
-      --skip-flathub)     DO_FLATHUB=0 ;;
-      --skip-trim)        DO_TRIM=0 ;;
-      --skip-tuning)      DO_TUNING=0 ;;
-      --skip-cleanup)     DO_CLEANUP=0 ;;
+      --dry-run)            DRY_RUN=1 ;;
+      --yes|--no-confirm)   ASSUME_YES=1; DO_CONFIRM=0 ;;
+      --minimal)            MINIMAL_MODE=1 ;;
+      --full)               MINIMAL_MODE=0 ;;
+      --no-update)          DO_UPDATE=0 ;;
+      --skip-microcode)     DO_MICROCODE=0 ;;
+      --skip-nvidia)        DO_NVIDIA=0 ;;
+      --skip-i386)          DO_I386=0 ;;
+      --skip-graphics)      DO_GRAPHICS=0 ;;
+      --skip-gaming)        DO_GAMING=0 ;;
+      --skip-gaming-tools)  DO_GAMING_TOOLS=0 ;;
+      --skip-devtools)      DO_DEVTOOLS=0 ;;
+      --skip-extras)        DO_EXTRAS=0 ;;
+      --skip-power)         DO_POWER=0 ;;
+      --skip-flathub)       DO_FLATHUB=0 ;;
+      --skip-trim)          DO_TRIM=0 ;;
+      --skip-tuning)        DO_TUNING=0 ;;
+      --skip-cleanup)       DO_CLEANUP=0 ;;
       --help|-h)
         print_usage
         exit 0
@@ -370,7 +425,7 @@ warn_if_non_lts() {
   version_id="$(. /etc/os-release && printf '%s' "${VERSION_ID:-}")"
   case "$version_id" in
     20.04|22.04|24.04) ;;
-    *) warn "Ubuntu ${version_id:-unknown} detected. Script is best tested on LTS versions (20.04/22.04/24.04)." ;;
+    *) warn "Ubuntu ${version_id:-unknown} detected. Best tested on LTS versions: 20.04 / 22.04 / 24.04." ;;
   esac
 }
 
@@ -399,11 +454,11 @@ init_sudo() {
 
 detect_cpu_vendor() {
   if grep -qi 'AuthenticAMD\|amd' /proc/cpuinfo; then
-    echo "amd"
+    CPU_VENDOR="amd"
   elif grep -qi 'GenuineIntel\|intel' /proc/cpuinfo; then
-    echo "intel"
+    CPU_VENDOR="intel"
   else
-    echo "unknown"
+    CPU_VENDOR="unknown"
   fi
 }
 
@@ -413,19 +468,21 @@ collect_gpu_info() {
   else
     GPU_INFO=""
   fi
+
+  if printf '%s\n' "$GPU_INFO" | grep -qi nvidia; then
+    GPU_HAS_NVIDIA=1
+  fi
+  if printf '%s\n' "$GPU_INFO" | grep -Eqi 'amd|advanced micro devices|ati'; then
+    GPU_HAS_AMD=1
+  fi
+  if printf '%s\n' "$GPU_INFO" | grep -qi intel; then
+    GPU_HAS_INTEL=1
+  fi
 }
 
-has_nvidia_gpu() {
-  [ -n "$GPU_INFO" ] && printf '%s\n' "$GPU_INFO" | grep -qi nvidia
-}
-
-has_amd_gpu() {
-  [ -n "$GPU_INFO" ] && printf '%s\n' "$GPU_INFO" | grep -Eqi 'amd|advanced micro devices|ati'
-}
-
-has_intel_gpu() {
-  [ -n "$GPU_INFO" ] && printf '%s\n' "$GPU_INFO" | grep -qi intel
-}
+has_nvidia_gpu() { [ "$GPU_HAS_NVIDIA" -eq 1 ]; }
+has_amd_gpu()    { [ "$GPU_HAS_AMD" -eq 1 ]; }
+has_intel_gpu()  { [ "$GPU_HAS_INTEL" -eq 1 ]; }
 
 ensure_pciutils_if_possible() {
   if ! command -v lspci >/dev/null 2>&1; then
@@ -442,7 +499,7 @@ enable_i386_arch() {
   [ "$DO_I386" -eq 1 ] || return 0
 
   if ! confirm "Enable i386 architecture (needed for many Wine/Proton titles)?"; then
-    warn "Skipped i386 architecture per user confirmation"
+    warn "Skipped i386 architecture"
     return 0
   fi
 
@@ -470,7 +527,7 @@ system_update() {
   apt_cmd upgrade "${APT_UPGRADE_OPTS[@]}"
 
   log "Fixing package issues if needed"
-  try_run_sudo env "${APT_ENV[@]}" apt-get -f install -y
+  try_run_sudo env "${APT_ENV[@]}" apt-get "${APT_RETRY_OPTS[@]}" -f install "${APT_FIX_OPTS[@]}"
 }
 
 cleanup_system() {
@@ -488,7 +545,7 @@ cleanup_system() {
 install_microcode() {
   [ "$DO_MICROCODE" -eq 1 ] || return 0
 
-  case "$(detect_cpu_vendor)" in
+  case "$CPU_VENDOR" in
     amd)
       log "AMD CPU detected"
       install_if_available amd64-microcode
@@ -506,20 +563,22 @@ install_microcode() {
 install_nvidia_if_needed() {
   [ "$DO_NVIDIA" -eq 1 ] || return 0
 
-  if has_nvidia_gpu; then
-    log "NVIDIA GPU detected"
-    if ! confirm "Run ubuntu-drivers autoinstall for NVIDIA?"; then
-      warn "Skipping NVIDIA auto install by confirmation"
-      return 0
-    fi
-
-    if command -v ubuntu-drivers >/dev/null 2>&1; then
-      try_run_sudo ubuntu-drivers autoinstall
-    else
-      warn "ubuntu-drivers not found, skipping NVIDIA auto install"
-    fi
-  else
+  if ! has_nvidia_gpu; then
     log "No NVIDIA GPU detected, skipping NVIDIA driver auto-install"
+    return 0
+  fi
+
+  log "NVIDIA GPU detected"
+
+  if ! confirm "Run ubuntu-drivers autoinstall for NVIDIA?"; then
+    warn "Skipping NVIDIA auto-install"
+    return 0
+  fi
+
+  if command -v ubuntu-drivers >/dev/null 2>&1; then
+    try_run_sudo ubuntu-drivers autoinstall
+  else
+    warn "ubuntu-drivers not found, skipping NVIDIA auto-install"
   fi
 }
 
@@ -541,9 +600,15 @@ install_core_graphics() {
 
 install_steam() {
   log "Installing Steam"
+
+  if ! has_multiverse_enabled; then
+    warn "Multiverse does not appear enabled. Steam may be unavailable."
+    warn "Enable it with:"
+    warn "  sudo add-apt-repository multiverse && sudo apt update"
+  fi
+
   if ! install_first_available steam-installer steam; then
     warn "No Steam package available in current repositories"
-    warn "You may need multiverse enabled or manual Steam installation"
   fi
 }
 
@@ -609,10 +674,14 @@ setup_flathub() {
 enable_trim_if_ssd() {
   [ "$DO_TRIM" -eq 1 ] || return 0
 
-  if lsblk -d -o rota | tail -n +2 | grep -q '^0$'; then
+  if lsblk -dno ROTA | grep -qx '0'; then
     log "SSD detected, enabling fstrim.timer"
-    try_run_sudo systemctl enable fstrim.timer
-    try_run_sudo systemctl start fstrim.timer
+    if service_exists fstrim.timer; then
+      try_run_sudo systemctl enable fstrim.timer
+      try_run_sudo systemctl start fstrim.timer
+    else
+      warn "fstrim.timer service not found"
+    fi
   else
     warn "No SSD detected, skipping fstrim.timer"
   fi
@@ -622,37 +691,22 @@ set_light_tunables() {
   [ "$DO_TUNING" -eq 1 ] || return 0
 
   if ! confirm "Apply lightweight sysctl tuning for gaming responsiveness?"; then
-    warn "Skipping sysctl tuning by confirmation"
+    warn "Skipping sysctl tuning"
     return 0
   fi
 
   log "Applying lightweight system tuning"
 
-  local tmp
-  tmp="$(mktemp)"
-
-  cat > "$tmp" <<'EOF_SYSCTL'
-# Ubuntu gaming/dev tuneables
+  write_if_changed 0644 "$SYSCTL_FILE" <<'EOF'
+# Ubuntu gaming/dev tunables
 # Safe, lightweight VM adjustments
 vm.swappiness=10
 vm.vfs_cache_pressure=50
-EOF_SYSCTL
+EOF
 
-  if [ "$DRY_RUN" -eq 1 ]; then
-    printf '[DRY-RUN] compare and possibly install %s -> %s\n' "$tmp" "$SYSCTL_FILE"
-    rm -f "$tmp"
-    return 0
-  fi
-
-  if ! sudo cmp -s "$tmp" "$SYSCTL_FILE" 2>/dev/null; then
-    log "Installing sysctl profile: $SYSCTL_FILE"
-    sudo install -m 0644 "$tmp" "$SYSCTL_FILE"
+  if [ "$DRY_RUN" -ne 1 ]; then
     sudo sysctl --system >/dev/null || warn "Failed to reload sysctl settings"
-  else
-    log "Sysctl tuning already up to date"
   fi
-
-  rm -f "$tmp"
 }
 
 set_default_power_mode() {
@@ -677,9 +731,9 @@ create_power_toggle_scripts() {
   [ "$DO_POWER" -eq 1 ] || return 0
 
   log "Creating power mode helper scripts"
-  mkdir -p "$LOCAL_BIN_DIR"
+  ensure_user_dir "$LOCAL_BIN_DIR"
 
-  write_file_with_mode 0755 "$LOCAL_BIN_DIR/power-battery" <<'EOF_BAT'
+  write_if_changed 0755 "$LOCAL_BIN_DIR/power-battery" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 if command -v powerprofilesctl >/dev/null 2>&1; then
@@ -689,9 +743,9 @@ else
   echo "powerprofilesctl not found" >&2
   exit 1
 fi
-EOF_BAT
+EOF
 
-  write_file_with_mode 0755 "$LOCAL_BIN_DIR/power-balanced" <<'EOF_BAL'
+  write_if_changed 0755 "$LOCAL_BIN_DIR/power-balanced" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 if command -v powerprofilesctl >/dev/null 2>&1; then
@@ -701,9 +755,9 @@ else
   echo "powerprofilesctl not found" >&2
   exit 1
 fi
-EOF_BAL
+EOF
 
-  write_file_with_mode 0755 "$LOCAL_BIN_DIR/power-performance" <<'EOF_PERF'
+  write_if_changed 0755 "$LOCAL_BIN_DIR/power-performance" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 if command -v powerprofilesctl >/dev/null 2>&1; then
@@ -713,16 +767,18 @@ else
   echo "powerprofilesctl not found" >&2
   exit 1
 fi
-EOF_PERF
+EOF
+
+  warn_if_local_bin_missing_from_path
 }
 
 create_gaming_helper_scripts() {
   [ "$DO_GAMING" -eq 1 ] || return 0
 
   log "Creating gaming helper scripts"
-  mkdir -p "$LOCAL_BIN_DIR"
+  ensure_user_dir "$LOCAL_BIN_DIR"
 
-  write_file_with_mode 0755 "$LOCAL_BIN_DIR/game-launch" <<'EOF_GL'
+  write_if_changed 0755 "$LOCAL_BIN_DIR/game-launch" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -740,22 +796,18 @@ if command -v gamemoderun >/dev/null 2>&1; then
 fi
 
 exec "${runner[@]}" "$@"
-EOF_GL
+EOF
 
-  if ! printf '%s\n' "$PATH" | tr ':' '\n' | grep -qx "$LOCAL_BIN_DIR"; then
-    warn "~/.local/bin is not in PATH for this shell"
-    warn "Add this to ~/.bashrc or ~/.zshrc:"
-    warn 'export PATH="$HOME/.local/bin:$PATH"'
-  fi
+  warn_if_local_bin_missing_from_path
 }
 
 configure_mangohud_default() {
   [ "$DO_GAMING" -eq 1 ] || return 0
 
   log "Configuring default MangoHud profile"
-  mkdir -p "$(dirname "$MANGOHUD_CONFIG_FILE")"
+  ensure_user_dir "$MANGOHUD_CONFIG_DIR"
 
-  write_file_with_mode 0644 "$MANGOHUD_CONFIG_FILE" <<'EOF_MANGO'
+  write_if_changed 0644 "$MANGOHUD_CONFIG_FILE" <<'EOF'
 # Minimal readable default MangoHud config
 legacy_layout=false
 horizontal
@@ -766,7 +818,7 @@ cpu_stats
 temp
 ram
 vram
-EOF_MANGO
+EOF
 }
 
 #######################################
@@ -774,7 +826,7 @@ EOF_MANGO
 #######################################
 
 print_plan() {
-  cat <<EOF_PLAN
+  cat <<EOF
 
 ========================================
 Planned sections
@@ -797,12 +849,13 @@ Dry-run mode:               $DRY_RUN
 Minimal mode:               $MINIMAL_MODE
 Confirmations enabled:      $DO_CONFIRM
 Assume yes:                 $ASSUME_YES
+CPU vendor:                 $CPU_VENDOR
 
-EOF_PLAN
+EOF
 }
 
 show_notes() {
-  cat <<'EOF_NOTES'
+  cat <<'EOF'
 
 ========================================
 Done.
@@ -839,12 +892,17 @@ Recommended next steps:
 5. Steam launch options:
      game-launch %command%
 
-EOF_NOTES
+EOF
 }
+
+#######################################
+# Main
+#######################################
 
 main() {
   parse_args "$@"
   preflight
+  detect_cpu_vendor
 
   log "Starting Ubuntu gaming setup"
   print_plan
