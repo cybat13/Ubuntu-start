@@ -1,23 +1,19 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-trap 'echo "[ERROR] Line $LINENO: $BASH_COMMAND" >&2' ERR
+trap 'printf "[ERROR] Line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
 
 #######################################
-# Logging / helpers
+# Constants / defaults
 #######################################
 
-log()  { printf "\n==> %s\n" "$1"; }
-warn() { printf "[WARN] %s\n" "$1" >&2; }
-die()  { printf "[ERROR] %s\n" "$1" >&2; exit 1; }
+readonly SCRIPT_NAME="$(basename "$0")"
+readonly SYSCTL_FILE="/etc/sysctl.d/99-ubuntu-gaming.conf"
+readonly LOCAL_BIN_DIR="${HOME}/.local/bin"
 
-require_cmd() {
-  command -v "$1" >/dev/null 2>&1 || die "Missing command: $1"
-}
-
-#######################################
-# Defaults / flags
-#######################################
+APT_ENV=(DEBIAN_FRONTEND=noninteractive)
+APT_INSTALL_OPTS=(-y --no-install-recommends)
+APT_UPGRADE_OPTS=(-y)
 
 DO_UPDATE=1
 DO_MICROCODE=1
@@ -34,12 +30,223 @@ DO_CLEANUP=1
 
 MINIMAL_MODE=0
 DRY_RUN=0
-ASSUME_YES=1
+
+#######################################
+# Package groups
+#######################################
+
+GRAPHICS_PACKAGES=(
+  mesa-utils
+  vulkan-tools
+  libvulkan1
+  libvulkan1:i386
+  libgl1-mesa-dri
+  libgl1-mesa-dri:i386
+  libglx-mesa0
+  libglx-mesa0:i386
+  libgbm1
+  libgbm1:i386
+  libdrm2
+  libdrm2:i386
+)
+
+GAMING_PACKAGES=(
+  lutris
+  gamemode
+  libgamemode0
+  libgamemodeauto0
+  mangohud
+)
+
+WINE_PACKAGES=(
+  wine
+  wine64
+  wine32
+  winetricks
+)
+
+DEV_PACKAGES=(
+  git
+  curl
+  wget
+  build-essential
+  cmake
+  ninja-build
+  pkg-config
+  python3
+  python3-pip
+  python3-venv
+  nodejs
+  npm
+  unzip
+  zip
+  tar
+  xz-utils
+  ripgrep
+  fd-find
+  neovim
+  tmux
+  htop
+  btop
+  fastfetch
+  jq
+)
+
+EXTRA_PACKAGES=(
+  pciutils
+  fwupd
+  flatpak
+  gnome-disk-utility
+  p7zip-full
+  file-roller
+  ca-certificates
+  software-properties-common
+)
+
+POWER_PACKAGES=(
+  power-profiles-daemon
+)
+
+#######################################
+# Logging / helpers
+#######################################
+
+log()  { printf "\n==> %s\n" "$1"; }
+warn() { printf "[WARN] %s\n" "$1" >&2; }
+die()  { printf "[ERROR] %s\n" "$1" >&2; exit 1; }
+
+require_cmd() {
+  command -v "$1" >/dev/null 2>&1 || die "Missing command: $1"
+}
+
+run() {
+  if [ "$DRY_RUN" -eq 1 ]; then
+    printf '[DRY-RUN] '
+    printf '%q ' "$@"
+    printf '\n'
+  else
+    "$@"
+  fi
+}
+
+run_sudo() {
+  if [ "$DRY_RUN" -eq 1 ]; then
+    printf '[DRY-RUN] sudo '
+    printf '%q ' "$@"
+    printf '\n'
+  else
+    sudo "$@"
+  fi
+}
+
+try_run() {
+  if [ "$DRY_RUN" -eq 1 ]; then
+    printf '[DRY-RUN] '
+    printf '%q ' "$@"
+    printf '\n'
+    return 0
+  fi
+
+  if ! "$@"; then
+    warn "Command failed: $*"
+    return 1
+  fi
+}
+
+try_run_sudo() {
+  if [ "$DRY_RUN" -eq 1 ]; then
+    printf '[DRY-RUN] sudo '
+    printf '%q ' "$@"
+    printf '\n'
+    return 0
+  fi
+
+  if ! sudo "$@"; then
+    warn "Command failed: sudo $*"
+    return 1
+  fi
+}
+
+is_installed() {
+  dpkg -s "$1" >/dev/null 2>&1
+}
+
+have_pkg() {
+  local candidate
+  candidate="$(apt-cache policy "$1" 2>/dev/null | awk '/Candidate:/ {print $2}')"
+  [ -n "$candidate" ] && [ "$candidate" != "(none)" ]
+}
+
+apt_install() {
+  [ $# -gt 0 ] || return 0
+
+  if [ "$DRY_RUN" -eq 1 ]; then
+    printf '[DRY-RUN] sudo env DEBIAN_FRONTEND=noninteractive apt-get install '
+    printf '%q ' "${APT_INSTALL_OPTS[@]}"
+    printf '%q ' "$@"
+    printf '\n'
+  else
+    sudo env "${APT_ENV[@]}" apt-get install "${APT_INSTALL_OPTS[@]}" "$@"
+  fi
+}
+
+install_if_available() {
+  local to_install=()
+  local pkg
+
+  for pkg in "$@"; do
+    if ! have_pkg "$pkg"; then
+      warn "Package unavailable: $pkg"
+    elif is_installed "$pkg"; then
+      log "Already installed: $pkg"
+    else
+      to_install+=("$pkg")
+    fi
+  done
+
+  [ ${#to_install[@]} -gt 0 ] || return 0
+
+  log "Installing: ${to_install[*]}"
+  apt_install "${to_install[@]}"
+}
+
+install_first_available() {
+  local pkg
+  for pkg in "$@"; do
+    if have_pkg "$pkg"; then
+      install_if_available "$pkg"
+      return 0
+    fi
+  done
+  return 1
+}
+
+write_file_with_mode() {
+  local mode="$1"
+  local target="$2"
+  local tmp
+
+  tmp="$(mktemp)"
+  cat > "$tmp"
+
+  if [ "$DRY_RUN" -eq 1 ]; then
+    printf '[DRY-RUN] install -m %s %s %s\n' "$mode" "$tmp" "$target"
+    rm -f "$tmp"
+    return 0
+  fi
+
+  install -m "$mode" "$tmp" "$target"
+  rm -f "$tmp"
+}
+
+#######################################
+# Usage / args
+#######################################
 
 print_usage() {
-  cat <<'EOF'
+  cat <<EOF
 Usage:
-  ubuntu-gaming-setup.sh [options]
+  $SCRIPT_NAME [options]
 
 Options:
   --dry-run            Show what would run, but do not make changes
@@ -57,13 +264,13 @@ Options:
   --skip-trim          Skip fstrim.timer enablement
   --skip-tuning        Skip sysctl tuning
   --skip-cleanup       Skip apt autoremove/autoclean
-  --help               Show this help
+  --help, -h           Show this help
 
 Examples:
-  ./ubuntu-gaming-setup.sh
-  ./ubuntu-gaming-setup.sh --minimal
-  ./ubuntu-gaming-setup.sh --dry-run --skip-devtools
-  ./ubuntu-gaming-setup.sh --skip-nvidia --skip-power
+  ./$SCRIPT_NAME
+  ./$SCRIPT_NAME --minimal
+  ./$SCRIPT_NAME --dry-run --skip-devtools
+  ./$SCRIPT_NAME --skip-nvidia --skip-power
 EOF
 }
 
@@ -98,44 +305,10 @@ parse_args() {
 
   if [ "$MINIMAL_MODE" -eq 1 ]; then
     DO_DEVTOOLS=0
-    DO_EXTRAS=1
+    DO_EXTRAS=0
     DO_FLATHUB=0
-  fi
-}
-
-#######################################
-# Command runner
-#######################################
-
-run() {
-  if [ "$DRY_RUN" -eq 1 ]; then
-    printf '[DRY-RUN] '
-    printf '%q ' "$@"
-    printf '\n'
-  else
-    "$@"
-  fi
-}
-
-run_sudo() {
-  if [ "$DRY_RUN" -eq 1 ]; then
-    printf '[DRY-RUN] sudo '
-    printf '%q ' "$@"
-    printf '\n'
-  else
-    sudo "$@"
-  fi
-}
-
-apt_install() {
-  [ $# -gt 0 ] || return 0
-
-  if [ "$DRY_RUN" -eq 1 ]; then
-    printf '[DRY-RUN] sudo apt-get install -y --no-install-recommends '
-    printf '%q ' "$@"
-    printf '\n'
-  else
-    sudo apt-get install -y --no-install-recommends "$@"
+    DO_POWER=0
+    DO_TUNING=0
   fi
 }
 
@@ -149,35 +322,22 @@ is_ubuntu() {
   [ "${ID:-}" = "ubuntu" ]
 }
 
-have_pkg() {
-  local candidate
-  candidate="$(apt-cache policy "$1" 2>/dev/null | awk '/Candidate:/ {print $2}')"
-  [ -n "$candidate" ] && [ "$candidate" != "(none)" ]
+preflight() {
+  require_cmd sudo
+  require_cmd apt-get
+  require_cmd apt-cache
+  require_cmd dpkg
+  require_cmd lsblk
+  require_cmd awk
+  require_cmd grep
+
+  is_ubuntu || die "This script currently supports Ubuntu only"
 }
 
-install_if_available() {
-  local ok=()
-  local pkg
-
-  for pkg in "$@"; do
-    if have_pkg "$pkg"; then
-      ok+=("$pkg")
-    else
-      warn "Package unavailable: $pkg"
-    fi
-  done
-
-  if [ ${#ok[@]} -gt 0 ]; then
-    log "Installing: ${ok[*]}"
-    apt_install "${ok[@]}"
-  fi
-}
-
-ensure_pciutils_if_possible() {
-  if ! command -v lspci >/dev/null 2>&1; then
-    log "lspci not found, attempting to install pciutils"
-    install_if_available pciutils
-  fi
+init_sudo() {
+  [ "$DRY_RUN" -eq 1 ] && return 0
+  log "Requesting sudo access"
+  sudo -v || die "Failed to obtain sudo privileges"
 }
 
 #######################################
@@ -194,32 +354,37 @@ detect_cpu_vendor() {
   fi
 }
 
-detect_gpu_vendor() {
-  if ! command -v lspci >/dev/null 2>&1; then
-    echo "unknown"
-    return 0
-  fi
+has_nvidia_gpu() {
+  command -v lspci >/dev/null 2>&1 &&
+    lspci | grep -Ei 'vga|3d|display' | grep -qi nvidia
+}
 
-  if lspci | grep -Ei 'vga|3d|display' | grep -qi nvidia; then
-    echo "nvidia"
-  elif lspci | grep -Ei 'vga|3d|display' | grep -qi 'amd|advanced micro devices|ati'; then
-    echo "amd"
-  elif lspci | grep -Ei 'vga|3d|display' | grep -qi intel; then
-    echo "intel"
-  else
-    echo "unknown"
+has_amd_gpu() {
+  command -v lspci >/dev/null 2>&1 &&
+    lspci | grep -Ei 'vga|3d|display' | grep -Eqi 'amd|advanced micro devices|ati'
+}
+
+has_intel_gpu() {
+  command -v lspci >/dev/null 2>&1 &&
+    lspci | grep -Ei 'vga|3d|display' | grep -qi intel
+}
+
+ensure_pciutils_if_possible() {
+  if ! command -v lspci >/dev/null 2>&1; then
+    log "lspci not found, attempting to install pciutils"
+    install_if_available pciutils
   fi
 }
 
 #######################################
-# Apt / repo / system
+# System / repo setup
 #######################################
 
 enable_i386_arch() {
   if ! dpkg --print-foreign-architectures | grep -qx i386; then
     log "Enabling i386 architecture"
     run_sudo dpkg --add-architecture i386
-    run_sudo apt-get update
+    run_sudo env "${APT_ENV[@]}" apt-get update
   else
     log "i386 architecture already enabled"
   fi
@@ -229,25 +394,21 @@ system_update() {
   [ "$DO_UPDATE" -eq 1 ] || return 0
 
   log "Updating package lists"
-  run_sudo apt-get update
+  run_sudo env "${APT_ENV[@]}" apt-get update
 
   log "Upgrading installed packages"
-  run_sudo apt-get upgrade -y
+  run_sudo env "${APT_ENV[@]}" apt-get upgrade "${APT_UPGRADE_OPTS[@]}"
 
   log "Fixing package issues if needed"
-  if [ "$DRY_RUN" -eq 1 ]; then
-    printf '[DRY-RUN] sudo apt-get -f install -y\n'
-  else
-    sudo apt-get -f install -y || true
-  fi
+  try_run_sudo env "${APT_ENV[@]}" apt-get -f install -y
 }
 
 cleanup_system() {
   [ "$DO_CLEANUP" -eq 1 ] || return 0
 
   log "Cleaning up"
-  run_sudo apt-get autoremove -y
-  run_sudo apt-get autoclean -y
+  run_sudo env "${APT_ENV[@]}" apt-get autoremove -y
+  run_sudo env "${APT_ENV[@]}" apt-get autoclean -y
 }
 
 #######################################
@@ -275,15 +436,10 @@ install_microcode() {
 install_nvidia_if_needed() {
   [ "$DO_NVIDIA" -eq 1 ] || return 0
 
-  if [ "$(detect_gpu_vendor)" = "nvidia" ]; then
+  if has_nvidia_gpu; then
     log "NVIDIA GPU detected"
-
     if command -v ubuntu-drivers >/dev/null 2>&1; then
-      if [ "$DRY_RUN" -eq 1 ]; then
-        printf '[DRY-RUN] sudo ubuntu-drivers autoinstall\n'
-      else
-        sudo ubuntu-drivers autoinstall || warn "ubuntu-drivers autoinstall failed"
-      fi
+      try_run_sudo ubuntu-drivers autoinstall
     else
       warn "ubuntu-drivers not found, skipping NVIDIA auto install"
     fi
@@ -292,45 +448,33 @@ install_nvidia_if_needed() {
   fi
 }
 
+print_gpu_summary() {
+  log "Detected GPU(s)"
+  has_nvidia_gpu && printf '  - NVIDIA\n'
+  has_amd_gpu && printf '  - AMD/ATI\n'
+  has_intel_gpu && printf '  - Intel\n'
+  if ! has_nvidia_gpu && ! has_amd_gpu && ! has_intel_gpu; then
+    printf '  - Unknown\n'
+  fi
+}
+
 install_core_graphics() {
   [ "$DO_GRAPHICS" -eq 1 ] || return 0
-
   log "Installing graphics and Vulkan support"
-  install_if_available \
-    mesa-utils \
-    vulkan-tools \
-    libvulkan1 \
-    libvulkan1:i386 \
-    libgl1-mesa-dri \
-    libgl1-mesa-dri:i386 \
-    libglx-mesa0 \
-    libglx-mesa0:i386 \
-    libgbm1 \
-    libgbm1:i386 \
-    libdrm2 \
-    libdrm2:i386
+  install_if_available "${GRAPHICS_PACKAGES[@]}"
 }
 
 install_steam() {
   log "Installing Steam"
-
-  if have_pkg steam-installer; then
-    install_if_available steam-installer
-  elif have_pkg steam; then
-    install_if_available steam
-  else
+  if ! install_first_available steam-installer steam; then
     warn "No Steam package available in current repositories"
-    warn "You may need to install Steam manually from Valve's launcher package"
+    warn "You may need multiverse enabled or manual Steam installation"
   fi
 }
 
 install_wine_stack() {
   log "Installing Wine stack"
-  install_if_available \
-    wine \
-    wine64 \
-    wine32 \
-    winetricks
+  install_if_available "${WINE_PACKAGES[@]}"
 }
 
 install_gaming_stack() {
@@ -338,12 +482,7 @@ install_gaming_stack() {
 
   log "Installing gaming stack"
   install_steam
-  install_if_available \
-    lutris \
-    gamemode \
-    libgamemode0 \
-    libgamemodeauto0 \
-    mangohud
+  install_if_available "${GAMING_PACKAGES[@]}"
   install_wine_stack
 }
 
@@ -351,53 +490,21 @@ install_dev_basics() {
   [ "$DO_DEVTOOLS" -eq 1 ] || return 0
 
   log "Installing dev basics"
-  install_if_available \
-    git \
-    curl \
-    wget \
-    build-essential \
-    cmake \
-    ninja-build \
-    pkg-config \
-    python3 \
-    python3-pip \
-    python3-venv \
-    nodejs \
-    npm \
-    unzip \
-    zip \
-    tar \
-    xz-utils \
-    ripgrep \
-    fd-find \
-    neovim \
-    tmux \
-    htop \
-    btop \
-    fastfetch \
-    jq
+  install_if_available "${DEV_PACKAGES[@]}"
 }
 
 install_useful_bits() {
   [ "$DO_EXTRAS" -eq 1 ] || return 0
 
   log "Installing useful extras"
-  install_if_available \
-    pciutils \
-    fwupd \
-    flatpak \
-    gnome-disk-utility \
-    p7zip-full \
-    file-roller \
-    ca-certificates \
-    software-properties-common
+  install_if_available "${EXTRA_PACKAGES[@]}"
 }
 
 install_power_profile_tools() {
   [ "$DO_POWER" -eq 1 ] || return 0
 
   log "Installing laptop power profile tools"
-  install_if_available power-profiles-daemon
+  install_if_available "${POWER_PACKAGES[@]}"
 }
 
 setup_flathub() {
@@ -408,7 +515,8 @@ setup_flathub() {
     if [ "$DRY_RUN" -eq 1 ]; then
       printf '[DRY-RUN] flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo\n'
     else
-      flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo || warn "Failed to add Flathub"
+      flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo \
+        || warn "Failed to add Flathub"
     fi
   else
     warn "flatpak not installed, skipping Flathub setup"
@@ -420,8 +528,8 @@ enable_trim_if_ssd() {
 
   if lsblk -d -o rota | tail -n +2 | grep -q '^0$'; then
     log "SSD detected, enabling fstrim.timer"
-    run_sudo systemctl enable fstrim.timer >/dev/null 2>&1 || true
-    run_sudo systemctl start fstrim.timer >/dev/null 2>&1 || true
+    try_run_sudo systemctl enable fstrim.timer
+    try_run_sudo systemctl start fstrim.timer
   else
     warn "No SSD detected, skipping fstrim.timer"
   fi
@@ -432,24 +540,26 @@ set_light_tunables() {
 
   log "Applying lightweight system tuning"
 
-  local target="/etc/sysctl.d/99-ubuntu-gaming.conf"
   local tmp
   tmp="$(mktemp)"
 
   cat > "$tmp" <<'EOF'
+# Ubuntu gaming/dev tuneables
+# Safe, lightweight VM adjustments
 vm.swappiness=10
 vm.vfs_cache_pressure=50
 EOF
 
   if [ "$DRY_RUN" -eq 1 ]; then
-    printf '[DRY-RUN] compare and possibly install %s -> %s\n' "$tmp" "$target"
+    printf '[DRY-RUN] compare and possibly install %s -> %s\n' "$tmp" "$SYSCTL_FILE"
     rm -f "$tmp"
     return 0
   fi
 
-  if ! sudo cmp -s "$tmp" "$target" 2>/dev/null; then
-    sudo install -m 0644 "$tmp" "$target"
-    sudo sysctl --system >/dev/null || true
+  if ! sudo cmp -s "$tmp" "$SYSCTL_FILE" 2>/dev/null; then
+    log "Installing sysctl profile: $SYSCTL_FILE"
+    sudo install -m 0644 "$tmp" "$SYSCTL_FILE"
+    sudo sysctl --system >/dev/null || warn "Failed to reload sysctl settings"
   else
     log "Sysctl tuning already up to date"
   fi
@@ -462,13 +572,13 @@ set_default_power_mode() {
 
   if command -v powerprofilesctl >/dev/null 2>&1; then
     log "Enabling power-profiles-daemon"
-    run_sudo systemctl enable --now power-profiles-daemon >/dev/null 2>&1 || true
+    try_run_sudo systemctl enable --now power-profiles-daemon
 
     log "Setting default power mode to balanced"
     if [ "$DRY_RUN" -eq 1 ]; then
       printf '[DRY-RUN] powerprofilesctl set balanced\n'
     else
-      powerprofilesctl set balanced || true
+      powerprofilesctl set balanced || warn "Failed to set balanced power mode"
     fi
   else
     warn "powerprofilesctl not found, skipping default power mode"
@@ -479,51 +589,45 @@ create_power_toggle_scripts() {
   [ "$DO_POWER" -eq 1 ] || return 0
 
   log "Creating power mode helper scripts"
+  mkdir -p "$LOCAL_BIN_DIR"
 
-  mkdir -p "$HOME/.local/bin"
-
-  cat > "$HOME/.local/bin/power-battery" <<'EOF'
+  write_file_with_mode 0755 "$LOCAL_BIN_DIR/power-battery" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 if command -v powerprofilesctl >/dev/null 2>&1; then
   powerprofilesctl set power-saver
   echo "Switched to: power-saver"
 else
-  echo "powerprofilesctl not found"
+  echo "powerprofilesctl not found" >&2
   exit 1
 fi
 EOF
 
-  cat > "$HOME/.local/bin/power-balanced" <<'EOF'
+  write_file_with_mode 0755 "$LOCAL_BIN_DIR/power-balanced" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 if command -v powerprofilesctl >/dev/null 2>&1; then
   powerprofilesctl set balanced
   echo "Switched to: balanced"
 else
-  echo "powerprofilesctl not found"
+  echo "powerprofilesctl not found" >&2
   exit 1
 fi
 EOF
 
-  cat > "$HOME/.local/bin/power-performance" <<'EOF'
+  write_file_with_mode 0755 "$LOCAL_BIN_DIR/power-performance" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 if command -v powerprofilesctl >/dev/null 2>&1; then
   powerprofilesctl set performance
   echo "Switched to: performance"
 else
-  echo "powerprofilesctl not found"
+  echo "powerprofilesctl not found" >&2
   exit 1
 fi
 EOF
 
-  chmod +x \
-    "$HOME/.local/bin/power-battery" \
-    "$HOME/.local/bin/power-balanced" \
-    "$HOME/.local/bin/power-performance"
-
-  if ! echo "$PATH" | tr ':' '\n' | grep -qx "$HOME/.local/bin"; then
+  if ! printf '%s\n' "$PATH" | tr ':' '\n' | grep -qx "$LOCAL_BIN_DIR"; then
     warn "~/.local/bin is not in PATH for this shell"
     warn "Add this to ~/.bashrc or ~/.zshrc:"
     warn 'export PATH="$HOME/.local/bin:$PATH"'
@@ -597,7 +701,7 @@ Recommended next steps:
 Notes:
 - Use power-performance while plugged in and gaming
 - Use power-balanced for normal daily use
-- Use power-battery when on battery
+- Use power-saver when on battery
 - On some laptops, "performance" may not be available
 - Some packages may be skipped if unavailable in your enabled repositories
 
@@ -613,21 +717,10 @@ EOF
 # Main
 #######################################
 
-preflight() {
-  require_cmd sudo
-  require_cmd apt-get
-  require_cmd apt-cache
-  require_cmd dpkg
-  require_cmd lsblk
-  require_cmd awk
-  require_cmd grep
-
-  is_ubuntu || die "This script currently supports Ubuntu only"
-}
-
 main() {
   parse_args "$@"
   preflight
+  init_sudo
 
   log "Starting Ubuntu gaming setup"
   print_plan
@@ -635,6 +728,7 @@ main() {
   system_update
   install_useful_bits
   ensure_pciutils_if_possible
+  print_gpu_summary
   enable_i386_arch
   install_microcode
   install_nvidia_if_needed
