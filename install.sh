@@ -10,16 +10,20 @@ trap 'printf "[ERROR] Line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
 readonly SCRIPT_NAME="$(basename "$0")"
 readonly SYSCTL_FILE="/etc/sysctl.d/99-ubuntu-gaming.conf"
 readonly LOCAL_BIN_DIR="${HOME}/.local/bin"
+readonly LOCAL_CONFIG_DIR="${HOME}/.config"
+readonly MANGOHUD_CONFIG_FILE="${LOCAL_CONFIG_DIR}/MangoHud/MangoHud.conf"
 
 APT_ENV=(DEBIAN_FRONTEND=noninteractive)
 APT_INSTALL_OPTS=(-y --no-install-recommends)
 APT_UPGRADE_OPTS=(-y)
+APT_RETRIES=3
 
 DO_UPDATE=1
 DO_MICROCODE=1
 DO_NVIDIA=1
 DO_GRAPHICS=1
 DO_GAMING=1
+DO_GAMING_TOOLS=1
 DO_DEVTOOLS=1
 DO_EXTRAS=1
 DO_POWER=1
@@ -27,9 +31,14 @@ DO_FLATHUB=1
 DO_TRIM=1
 DO_TUNING=1
 DO_CLEANUP=1
+DO_I386=1
+DO_CONFIRM=1
 
 MINIMAL_MODE=0
 DRY_RUN=0
+ASSUME_YES=0
+
+GPU_INFO=""
 
 #######################################
 # Package groups
@@ -56,6 +65,15 @@ GAMING_PACKAGES=(
   libgamemode0
   libgamemodeauto0
   mangohud
+)
+
+GAMING_TOOLS_PACKAGES=(
+  gamescope
+  goverlay
+  vkbasalt
+  protontricks
+  steam-devices
+  obs-studio
 )
 
 WINE_PACKAGES=(
@@ -119,14 +137,31 @@ require_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "Missing command: $1"
 }
 
-run() {
-  if [ "$DRY_RUN" -eq 1 ]; then
-    printf '[DRY-RUN] '
-    printf '%q ' "$@"
-    printf '\n'
-  else
-    "$@"
+is_tty() {
+  [ -t 0 ]
+}
+
+confirm() {
+  local prompt="$1"
+
+  if [ "$DRY_RUN" -eq 1 ] || [ "$ASSUME_YES" -eq 1 ] || [ "$DO_CONFIRM" -eq 0 ]; then
+    return 0
   fi
+
+  if ! is_tty; then
+    warn "No interactive TTY; auto-accepting: ${prompt}"
+    return 0
+  fi
+
+  local answer
+  while true; do
+    read -r -p "${prompt} [y/N]: " answer
+    case "$answer" in
+      y|Y|yes|YES) return 0 ;;
+      n|N|no|NO|"") return 1 ;;
+      *) printf 'Please answer y or n.\n' ;;
+    esac
+  done
 }
 
 run_sudo() {
@@ -136,20 +171,6 @@ run_sudo() {
     printf '\n'
   else
     sudo "$@"
-  fi
-}
-
-try_run() {
-  if [ "$DRY_RUN" -eq 1 ]; then
-    printf '[DRY-RUN] '
-    printf '%q ' "$@"
-    printf '\n'
-    return 0
-  fi
-
-  if ! "$@"; then
-    warn "Command failed: $*"
-    return 1
   fi
 }
 
@@ -177,17 +198,31 @@ have_pkg() {
   [ -n "$candidate" ] && [ "$candidate" != "(none)" ]
 }
 
-apt_install() {
-  [ $# -gt 0 ] || return 0
-
+apt_cmd() {
   if [ "$DRY_RUN" -eq 1 ]; then
-    printf '[DRY-RUN] sudo env DEBIAN_FRONTEND=noninteractive apt-get install '
-    printf '%q ' "${APT_INSTALL_OPTS[@]}"
+    printf '[DRY-RUN] sudo env DEBIAN_FRONTEND=noninteractive apt-get '
     printf '%q ' "$@"
     printf '\n'
-  else
-    sudo env "${APT_ENV[@]}" apt-get install "${APT_INSTALL_OPTS[@]}" "$@"
+    return 0
   fi
+
+  local attempt
+  local rc=0
+  for attempt in $(seq 1 "$APT_RETRIES"); do
+    if sudo env "${APT_ENV[@]}" apt-get "$@"; then
+      return 0
+    fi
+    rc=$?
+    warn "apt-get failed (attempt ${attempt}/${APT_RETRIES}): apt-get $*"
+    [ "$attempt" -lt "$APT_RETRIES" ] && sleep 3
+  done
+
+  return "$rc"
+}
+
+apt_install() {
+  [ $# -gt 0 ] || return 0
+  apt_cmd install "${APT_INSTALL_OPTS[@]}" "$@"
 }
 
 install_if_available() {
@@ -244,54 +279,61 @@ write_file_with_mode() {
 #######################################
 
 print_usage() {
-  cat <<EOF
+  cat <<EOF_USAGE
 Usage:
   $SCRIPT_NAME [options]
 
 Options:
-  --dry-run            Show what would run, but do not make changes
-  --minimal            Install a smaller core set only
-  --full               Enable all default sections
-  --no-update          Skip apt update/upgrade
-  --skip-microcode     Skip CPU microcode installation
-  --skip-nvidia        Skip NVIDIA driver auto-install
-  --skip-graphics      Skip Mesa/Vulkan userspace packages
-  --skip-gaming        Skip Steam/Lutris/Wine/GameMode/MangoHud
-  --skip-devtools      Skip developer tools
-  --skip-extras        Skip useful extras
-  --skip-power         Skip power-profiles-daemon and helper scripts
-  --skip-flathub       Skip Flathub setup
-  --skip-trim          Skip fstrim.timer enablement
-  --skip-tuning        Skip sysctl tuning
-  --skip-cleanup       Skip apt autoremove/autoclean
-  --help, -h           Show this help
+  --dry-run              Show what would run, but do not make changes
+  --yes                  Auto-confirm all prompts
+  --no-confirm           Disable confirmations (same effect as --yes)
+  --minimal              Install a smaller core set only
+  --full                 Enable all default sections
+  --no-update            Skip apt update/upgrade
+  --skip-microcode       Skip CPU microcode installation
+  --skip-nvidia          Skip NVIDIA driver auto-install
+  --skip-i386            Skip enabling i386 architecture
+  --skip-graphics        Skip Mesa/Vulkan userspace packages
+  --skip-gaming          Skip Steam/Lutris/Wine/GameMode/MangoHud
+  --skip-gaming-tools    Skip additional gaming tools (gamescope, vkbasalt, etc.)
+  --skip-devtools        Skip developer tools
+  --skip-extras          Skip useful extras
+  --skip-power           Skip power-profiles-daemon and helper scripts
+  --skip-flathub         Skip Flathub setup
+  --skip-trim            Skip fstrim.timer enablement
+  --skip-tuning          Skip sysctl tuning
+  --skip-cleanup         Skip apt autoremove/autoclean
+  --help, -h             Show this help
 
 Examples:
   ./$SCRIPT_NAME
-  ./$SCRIPT_NAME --minimal
-  ./$SCRIPT_NAME --dry-run --skip-devtools
-  ./$SCRIPT_NAME --skip-nvidia --skip-power
-EOF
+  ./$SCRIPT_NAME --dry-run
+  ./$SCRIPT_NAME --yes --skip-nvidia
+  ./$SCRIPT_NAME --minimal --skip-gaming-tools
+EOF_USAGE
 }
 
 parse_args() {
   while [ $# -gt 0 ]; do
     case "$1" in
-      --dry-run)        DRY_RUN=1 ;;
-      --minimal)        MINIMAL_MODE=1 ;;
-      --full)           MINIMAL_MODE=0 ;;
-      --no-update)      DO_UPDATE=0 ;;
-      --skip-microcode) DO_MICROCODE=0 ;;
-      --skip-nvidia)    DO_NVIDIA=0 ;;
-      --skip-graphics)  DO_GRAPHICS=0 ;;
-      --skip-gaming)    DO_GAMING=0 ;;
-      --skip-devtools)  DO_DEVTOOLS=0 ;;
-      --skip-extras)    DO_EXTRAS=0 ;;
-      --skip-power)     DO_POWER=0 ;;
-      --skip-flathub)   DO_FLATHUB=0 ;;
-      --skip-trim)      DO_TRIM=0 ;;
-      --skip-tuning)    DO_TUNING=0 ;;
-      --skip-cleanup)   DO_CLEANUP=0 ;;
+      --dry-run)          DRY_RUN=1 ;;
+      --yes|--no-confirm) ASSUME_YES=1; DO_CONFIRM=0 ;;
+      --minimal)          MINIMAL_MODE=1 ;;
+      --full)             MINIMAL_MODE=0 ;;
+      --no-update)        DO_UPDATE=0 ;;
+      --skip-microcode)   DO_MICROCODE=0 ;;
+      --skip-nvidia)      DO_NVIDIA=0 ;;
+      --skip-i386)        DO_I386=0 ;;
+      --skip-graphics)    DO_GRAPHICS=0 ;;
+      --skip-gaming)      DO_GAMING=0 ;;
+      --skip-gaming-tools) DO_GAMING_TOOLS=0 ;;
+      --skip-devtools)    DO_DEVTOOLS=0 ;;
+      --skip-extras)      DO_EXTRAS=0 ;;
+      --skip-power)       DO_POWER=0 ;;
+      --skip-flathub)     DO_FLATHUB=0 ;;
+      --skip-trim)        DO_TRIM=0 ;;
+      --skip-tuning)      DO_TUNING=0 ;;
+      --skip-cleanup)     DO_CLEANUP=0 ;;
       --help|-h)
         print_usage
         exit 0
@@ -309,6 +351,7 @@ parse_args() {
     DO_FLATHUB=0
     DO_POWER=0
     DO_TUNING=0
+    DO_GAMING_TOOLS=0
   fi
 }
 
@@ -322,6 +365,15 @@ is_ubuntu() {
   [ "${ID:-}" = "ubuntu" ]
 }
 
+warn_if_non_lts() {
+  local version_id=""
+  version_id="$(. /etc/os-release && printf '%s' "${VERSION_ID:-}")"
+  case "$version_id" in
+    20.04|22.04|24.04) ;;
+    *) warn "Ubuntu ${version_id:-unknown} detected. Script is best tested on LTS versions (20.04/22.04/24.04)." ;;
+  esac
+}
+
 preflight() {
   require_cmd sudo
   require_cmd apt-get
@@ -332,6 +384,7 @@ preflight() {
   require_cmd grep
 
   is_ubuntu || die "This script currently supports Ubuntu only"
+  warn_if_non_lts
 }
 
 init_sudo() {
@@ -354,19 +407,24 @@ detect_cpu_vendor() {
   fi
 }
 
+collect_gpu_info() {
+  if command -v lspci >/dev/null 2>&1; then
+    GPU_INFO="$(lspci | grep -Ei 'vga|3d|display' || true)"
+  else
+    GPU_INFO=""
+  fi
+}
+
 has_nvidia_gpu() {
-  command -v lspci >/dev/null 2>&1 &&
-    lspci | grep -Ei 'vga|3d|display' | grep -qi nvidia
+  [ -n "$GPU_INFO" ] && printf '%s\n' "$GPU_INFO" | grep -qi nvidia
 }
 
 has_amd_gpu() {
-  command -v lspci >/dev/null 2>&1 &&
-    lspci | grep -Ei 'vga|3d|display' | grep -Eqi 'amd|advanced micro devices|ati'
+  [ -n "$GPU_INFO" ] && printf '%s\n' "$GPU_INFO" | grep -Eqi 'amd|advanced micro devices|ati'
 }
 
 has_intel_gpu() {
-  command -v lspci >/dev/null 2>&1 &&
-    lspci | grep -Ei 'vga|3d|display' | grep -qi intel
+  [ -n "$GPU_INFO" ] && printf '%s\n' "$GPU_INFO" | grep -qi intel
 }
 
 ensure_pciutils_if_possible() {
@@ -381,10 +439,17 @@ ensure_pciutils_if_possible() {
 #######################################
 
 enable_i386_arch() {
+  [ "$DO_I386" -eq 1 ] || return 0
+
+  if ! confirm "Enable i386 architecture (needed for many Wine/Proton titles)?"; then
+    warn "Skipped i386 architecture per user confirmation"
+    return 0
+  fi
+
   if ! dpkg --print-foreign-architectures | grep -qx i386; then
     log "Enabling i386 architecture"
     run_sudo dpkg --add-architecture i386
-    run_sudo env "${APT_ENV[@]}" apt-get update
+    apt_cmd update
   else
     log "i386 architecture already enabled"
   fi
@@ -393,11 +458,16 @@ enable_i386_arch() {
 system_update() {
   [ "$DO_UPDATE" -eq 1 ] || return 0
 
+  if ! confirm "Run apt update/upgrade now?"; then
+    warn "Skipping package update/upgrade"
+    return 0
+  fi
+
   log "Updating package lists"
-  run_sudo env "${APT_ENV[@]}" apt-get update
+  apt_cmd update
 
   log "Upgrading installed packages"
-  run_sudo env "${APT_ENV[@]}" apt-get upgrade "${APT_UPGRADE_OPTS[@]}"
+  apt_cmd upgrade "${APT_UPGRADE_OPTS[@]}"
 
   log "Fixing package issues if needed"
   try_run_sudo env "${APT_ENV[@]}" apt-get -f install -y
@@ -407,8 +477,8 @@ cleanup_system() {
   [ "$DO_CLEANUP" -eq 1 ] || return 0
 
   log "Cleaning up"
-  run_sudo env "${APT_ENV[@]}" apt-get autoremove -y
-  run_sudo env "${APT_ENV[@]}" apt-get autoclean -y
+  apt_cmd autoremove -y
+  apt_cmd autoclean -y
 }
 
 #######################################
@@ -438,6 +508,11 @@ install_nvidia_if_needed() {
 
   if has_nvidia_gpu; then
     log "NVIDIA GPU detected"
+    if ! confirm "Run ubuntu-drivers autoinstall for NVIDIA?"; then
+      warn "Skipping NVIDIA auto install by confirmation"
+      return 0
+    fi
+
     if command -v ubuntu-drivers >/dev/null 2>&1; then
       try_run_sudo ubuntu-drivers autoinstall
     else
@@ -477,6 +552,13 @@ install_wine_stack() {
   install_if_available "${WINE_PACKAGES[@]}"
 }
 
+install_gaming_tools() {
+  [ "$DO_GAMING_TOOLS" -eq 1 ] || return 0
+
+  log "Installing additional gaming tools"
+  install_if_available "${GAMING_TOOLS_PACKAGES[@]}"
+}
+
 install_gaming_stack() {
   [ "$DO_GAMING" -eq 1 ] || return 0
 
@@ -484,6 +566,7 @@ install_gaming_stack() {
   install_steam
   install_if_available "${GAMING_PACKAGES[@]}"
   install_wine_stack
+  install_gaming_tools
 }
 
 install_dev_basics() {
@@ -538,17 +621,22 @@ enable_trim_if_ssd() {
 set_light_tunables() {
   [ "$DO_TUNING" -eq 1 ] || return 0
 
+  if ! confirm "Apply lightweight sysctl tuning for gaming responsiveness?"; then
+    warn "Skipping sysctl tuning by confirmation"
+    return 0
+  fi
+
   log "Applying lightweight system tuning"
 
   local tmp
   tmp="$(mktemp)"
 
-  cat > "$tmp" <<'EOF'
+  cat > "$tmp" <<'EOF_SYSCTL'
 # Ubuntu gaming/dev tuneables
 # Safe, lightweight VM adjustments
 vm.swappiness=10
 vm.vfs_cache_pressure=50
-EOF
+EOF_SYSCTL
 
   if [ "$DRY_RUN" -eq 1 ]; then
     printf '[DRY-RUN] compare and possibly install %s -> %s\n' "$tmp" "$SYSCTL_FILE"
@@ -591,7 +679,7 @@ create_power_toggle_scripts() {
   log "Creating power mode helper scripts"
   mkdir -p "$LOCAL_BIN_DIR"
 
-  write_file_with_mode 0755 "$LOCAL_BIN_DIR/power-battery" <<'EOF'
+  write_file_with_mode 0755 "$LOCAL_BIN_DIR/power-battery" <<'EOF_BAT'
 #!/usr/bin/env bash
 set -euo pipefail
 if command -v powerprofilesctl >/dev/null 2>&1; then
@@ -601,9 +689,9 @@ else
   echo "powerprofilesctl not found" >&2
   exit 1
 fi
-EOF
+EOF_BAT
 
-  write_file_with_mode 0755 "$LOCAL_BIN_DIR/power-balanced" <<'EOF'
+  write_file_with_mode 0755 "$LOCAL_BIN_DIR/power-balanced" <<'EOF_BAL'
 #!/usr/bin/env bash
 set -euo pipefail
 if command -v powerprofilesctl >/dev/null 2>&1; then
@@ -613,9 +701,9 @@ else
   echo "powerprofilesctl not found" >&2
   exit 1
 fi
-EOF
+EOF_BAL
 
-  write_file_with_mode 0755 "$LOCAL_BIN_DIR/power-performance" <<'EOF'
+  write_file_with_mode 0755 "$LOCAL_BIN_DIR/power-performance" <<'EOF_PERF'
 #!/usr/bin/env bash
 set -euo pipefail
 if command -v powerprofilesctl >/dev/null 2>&1; then
@@ -625,7 +713,34 @@ else
   echo "powerprofilesctl not found" >&2
   exit 1
 fi
-EOF
+EOF_PERF
+}
+
+create_gaming_helper_scripts() {
+  [ "$DO_GAMING" -eq 1 ] || return 0
+
+  log "Creating gaming helper scripts"
+  mkdir -p "$LOCAL_BIN_DIR"
+
+  write_file_with_mode 0755 "$LOCAL_BIN_DIR/game-launch" <<'EOF_GL'
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [ $# -eq 0 ]; then
+  echo "Usage: game-launch <command> [args...]" >&2
+  exit 1
+fi
+
+runner=()
+if command -v mangohud >/dev/null 2>&1; then
+  runner+=(mangohud)
+fi
+if command -v gamemoderun >/dev/null 2>&1; then
+  runner+=(gamemoderun)
+fi
+
+exec "${runner[@]}" "$@"
+EOF_GL
 
   if ! printf '%s\n' "$PATH" | tr ':' '\n' | grep -qx "$LOCAL_BIN_DIR"; then
     warn "~/.local/bin is not in PATH for this shell"
@@ -634,36 +749,60 @@ EOF
   fi
 }
 
+configure_mangohud_default() {
+  [ "$DO_GAMING" -eq 1 ] || return 0
+
+  log "Configuring default MangoHud profile"
+  mkdir -p "$(dirname "$MANGOHUD_CONFIG_FILE")"
+
+  write_file_with_mode 0644 "$MANGOHUD_CONFIG_FILE" <<'EOF_MANGO'
+# Minimal readable default MangoHud config
+legacy_layout=false
+horizontal
+fps
+frametime
+gpu_stats
+cpu_stats
+temp
+ram
+vram
+EOF_MANGO
+}
+
 #######################################
 # Reporting
 #######################################
 
 print_plan() {
-  cat <<EOF
+  cat <<EOF_PLAN
 
 ========================================
 Planned sections
 ========================================
-Update system:          $DO_UPDATE
-Install microcode:      $DO_MICROCODE
-Install NVIDIA driver:  $DO_NVIDIA
-Install graphics stack: $DO_GRAPHICS
-Install gaming stack:   $DO_GAMING
-Install dev tools:      $DO_DEVTOOLS
-Install extras:         $DO_EXTRAS
-Install power tools:    $DO_POWER
-Setup Flathub:          $DO_FLATHUB
-Enable TRIM:            $DO_TRIM
-Apply sysctl tuning:    $DO_TUNING
-Cleanup apt cache:      $DO_CLEANUP
-Dry-run mode:           $DRY_RUN
-Minimal mode:           $MINIMAL_MODE
+Update system:              $DO_UPDATE
+Enable i386 arch:           $DO_I386
+Install microcode:          $DO_MICROCODE
+Install NVIDIA driver:      $DO_NVIDIA
+Install graphics stack:     $DO_GRAPHICS
+Install gaming stack:       $DO_GAMING
+Install gaming tools:       $DO_GAMING_TOOLS
+Install dev tools:          $DO_DEVTOOLS
+Install extras:             $DO_EXTRAS
+Install power tools:        $DO_POWER
+Setup Flathub:              $DO_FLATHUB
+Enable TRIM:                $DO_TRIM
+Apply sysctl tuning:        $DO_TUNING
+Cleanup apt cache:          $DO_CLEANUP
+Dry-run mode:               $DRY_RUN
+Minimal mode:               $MINIMAL_MODE
+Confirmations enabled:      $DO_CONFIRM
+Assume yes:                 $ASSUME_YES
 
-EOF
+EOF_PLAN
 }
 
 show_notes() {
-  cat <<'EOF'
+  cat <<'EOF_NOTES'
 
 ========================================
 Done.
@@ -674,16 +813,18 @@ Installed or attempted:
 - Lutris
 - Wine + Winetricks
 - GameMode + MangoHud
+- gaming tools (gamescope/goverlay/vkbasalt/protontricks/obs)
 - firmware updater
 - optional dev tools
 - Flatpak support
 - mild system tuning
-- laptop power mode helpers
+- power mode + launcher helper scripts
 
-Power helper commands:
+Helper commands:
   power-battery
   power-balanced
   power-performance
+  game-launch %command%
 
 Check current power mode:
   powerprofilesctl get
@@ -696,44 +837,34 @@ Recommended next steps:
 4. Test Vulkan:
      vulkaninfo | less
 5. Steam launch options:
-     mangohud gamemoderun %command%
+     game-launch %command%
 
-Notes:
-- Use power-performance while plugged in and gaming
-- Use power-balanced for normal daily use
-- Use power-saver when on battery
-- On some laptops, "performance" may not be available
-- Some packages may be skipped if unavailable in your enabled repositories
-
-Useful examples:
-  ./ubuntu-gaming-setup.sh --dry-run
-  ./ubuntu-gaming-setup.sh --minimal
-  ./ubuntu-gaming-setup.sh --skip-devtools --skip-flathub
-
-EOF
+EOF_NOTES
 }
-
-#######################################
-# Main
-#######################################
 
 main() {
   parse_args "$@"
   preflight
-  init_sudo
 
   log "Starting Ubuntu gaming setup"
   print_plan
 
+  if ! confirm "Proceed with the selected setup plan?"; then
+    die "Cancelled by user"
+  fi
+
+  init_sudo
   system_update
   install_useful_bits
   ensure_pciutils_if_possible
+  collect_gpu_info
   print_gpu_summary
   enable_i386_arch
   install_microcode
   install_nvidia_if_needed
   install_core_graphics
   install_gaming_stack
+  configure_mangohud_default
   install_dev_basics
   install_power_profile_tools
   setup_flathub
@@ -741,6 +872,7 @@ main() {
   set_light_tunables
   set_default_power_mode
   create_power_toggle_scripts
+  create_gaming_helper_scripts
   cleanup_system
   show_notes
 }
