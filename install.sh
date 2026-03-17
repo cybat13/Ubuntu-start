@@ -11,6 +11,12 @@ require_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "Missing command: $1"
 }
 
+is_ubuntu() {
+  [ -r /etc/os-release ] || return 1
+  . /etc/os-release
+  [ "${ID:-}" = "ubuntu" ]
+}
+
 have_pkg() {
   local candidate
   candidate="$(apt-cache policy "$1" 2>/dev/null | awk '/Candidate:/ {print $2}')"
@@ -40,13 +46,15 @@ enable_i386_arch() {
     log "Enabling i386 architecture"
     sudo dpkg --add-architecture i386
     sudo apt-get update
+  else
+    log "i386 architecture already enabled"
   fi
 }
 
 detect_cpu_vendor() {
-  if grep -qi amd /proc/cpuinfo; then
+  if grep -qi 'AuthenticAMD\|amd' /proc/cpuinfo; then
     echo "amd"
-  elif grep -qi intel /proc/cpuinfo; then
+  elif grep -qi 'GenuineIntel\|intel' /proc/cpuinfo; then
     echo "intel"
   else
     echo "unknown"
@@ -54,9 +62,14 @@ detect_cpu_vendor() {
 }
 
 detect_gpu_vendor() {
+  if ! command -v lspci >/dev/null 2>&1; then
+    echo "unknown"
+    return 0
+  fi
+
   if lspci | grep -Ei 'vga|3d|display' | grep -qi nvidia; then
     echo "nvidia"
-  elif lspci | grep -Ei 'vga|3d|display' | grep -qi amd; then
+  elif lspci | grep -Ei 'vga|3d|display' | grep -qi 'amd|advanced micro devices|ati'; then
     echo "amd"
   elif lspci | grep -Ei 'vga|3d|display' | grep -qi intel; then
     echo "intel"
@@ -67,19 +80,27 @@ detect_gpu_vendor() {
 
 install_microcode() {
   case "$(detect_cpu_vendor)" in
-    amd)   install_if_available amd64-microcode ;;
-    intel) install_if_available intel-microcode ;;
-    *)     warn "Unknown CPU vendor, skipping microcode" ;;
+    amd)
+      install_if_available amd64-microcode
+      ;;
+    intel)
+      install_if_available intel-microcode
+      ;;
+    *)
+      warn "Unknown CPU vendor, skipping microcode"
+      ;;
   esac
 }
 
 install_nvidia_if_needed() {
   if [ "$(detect_gpu_vendor)" = "nvidia" ]; then
     log "NVIDIA GPU detected"
+
     if command -v ubuntu-drivers >/dev/null 2>&1; then
       sudo ubuntu-drivers autoinstall || warn "ubuntu-drivers autoinstall failed"
     else
       warn "ubuntu-drivers not found, skipping NVIDIA auto install"
+      warn "You may need to install an NVIDIA driver manually"
     fi
   fi
 }
@@ -101,17 +122,40 @@ install_core_graphics() {
     libdrm2:i386
 }
 
+install_steam() {
+  log "Installing Steam"
+
+  if have_pkg steam-installer; then
+    install_if_available steam-installer
+  elif have_pkg steam-devices; then
+    warn "steam-installer unavailable; installing steam-devices only"
+    install_if_available steam-devices
+    warn "Install Steam manually from the official Steam .deb if needed"
+  else
+    warn "No Steam package available in current repositories"
+    warn "Install Steam manually from the official Steam .deb if needed"
+  fi
+}
+
+install_wine_stack() {
+  log "Installing Wine stack"
+  install_if_available \
+    wine \
+    wine64 \
+    wine32 \
+    winetricks
+}
+
 install_gaming_stack() {
   log "Installing gaming stack"
+  install_steam
   install_if_available \
-    steam-installer \
     lutris \
     gamemode \
     libgamemode0 \
     libgamemodeauto0 \
-    mangohud \
-    wine64 \
-    winetricks
+    mangohud
+  install_wine_stack
 }
 
 install_dev_basics() {
@@ -146,6 +190,7 @@ install_dev_basics() {
 install_useful_bits() {
   log "Installing useful extras"
   install_if_available \
+    pciutils \
     fwupd \
     flatpak \
     gnome-disk-utility \
@@ -163,7 +208,9 @@ install_power_profile_tools() {
 setup_flathub() {
   if command -v flatpak >/dev/null 2>&1; then
     log "Adding Flathub"
-    flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo || true
+    flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo || warn "Failed to add Flathub"
+  else
+    warn "flatpak not installed, skipping Flathub setup"
   fi
 }
 
@@ -180,12 +227,23 @@ enable_trim_if_ssd() {
 set_light_tunables() {
   log "Applying lightweight system tuning"
 
-  sudo tee /etc/sysctl.d/99-ubuntu-gaming.conf >/dev/null <<'EOF'
+  local target="/etc/sysctl.d/99-ubuntu-gaming.conf"
+  local tmp
+  tmp="$(mktemp)"
+
+  cat > "$tmp" <<'EOF'
 vm.swappiness=10
 vm.vfs_cache_pressure=50
 EOF
 
-  sudo sysctl --system >/dev/null || true
+  if ! sudo cmp -s "$tmp" "$target" 2>/dev/null; then
+    sudo install -m 0644 "$tmp" "$target"
+    sudo sysctl --system >/dev/null || true
+  else
+    log "Sysctl tuning already up to date"
+  fi
+
+  rm -f "$tmp"
 }
 
 set_default_power_mode() {
@@ -257,8 +315,8 @@ system_update() {
   log "Updating package lists"
   sudo apt-get update
 
-  log "Upgrading system"
-  sudo apt-get dist-upgrade -y
+  log "Upgrading installed packages"
+  sudo apt-get upgrade -y
 
   log "Fixing package issues if needed"
   sudo apt-get -f install -y || true
@@ -276,9 +334,11 @@ show_notes() {
 ========================================
 Done.
 
-Installed:
+Installed or attempted:
 - graphics + Vulkan userspace
-- Steam + Lutris + Wine + Winetricks
+- Steam
+- Lutris
+- Wine + Winetricks
 - GameMode + MangoHud
 - firmware updater
 - lightweight dev tools
@@ -309,6 +369,7 @@ Notes:
 - Use power-balanced for normal daily use
 - Use power-battery when on battery
 - On some laptops, "performance" may not be available
+- Some packages may be skipped if unavailable in your enabled repositories
 
 Optional installs you can add later:
 - OBS Studio
@@ -320,24 +381,31 @@ Optional installs you can add later:
 EOF
 }
 
-main() {
+preflight() {
   require_cmd sudo
   require_cmd apt-get
   require_cmd apt-cache
-  require_cmd lspci
   require_cmd dpkg
   require_cmd lsblk
+  require_cmd awk
+  require_cmd grep
+
+  is_ubuntu || die "This script currently supports Ubuntu only"
+}
+
+main() {
+  preflight
 
   log "Starting lightweight Ubuntu gaming setup"
 
-  enable_i386_arch
   system_update
+  install_useful_bits
+  enable_i386_arch
   install_microcode
   install_nvidia_if_needed
   install_core_graphics
   install_gaming_stack
   install_dev_basics
-  install_useful_bits
   install_power_profile_tools
   setup_flathub
   enable_trim_if_ssd
