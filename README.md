@@ -1,21 +1,61 @@
-# Ubuntu Start: Lightweight Gaming & Dev Setup
+# Ubuntu Start: Lightweight Gaming & Development Setup
+
 [![Ask DeepWiki](https://devin.ai/assets/askdeepwiki.png)](https://deepwiki.com/cybat13/Ubuntu-start.git)
+![License](https://img.shields.io/badge/license-MIT-blue.svg)
+![Ubuntu](https://img.shields.io/badge/Ubuntu-22.04%2B-orange.svg)
 
-This repository contains a setup script to configure a fresh Ubuntu installation for gaming and development. It installs essential drivers, gaming clients, performance tools, and a lightweight set of development utilities.
+A comprehensive, automated setup script for configuring a fresh Ubuntu installation optimized for gaming and development. This script intelligently detects your hardware and installs essential drivers, gaming platforms, development tools, and system optimizations with minimal user intervention.
 
-## Features
+> **⚡ Quick Start:** Clone, run, and enjoy a fully configured gaming & dev environment in minutes.
 
--   **Gaming Essentials:** Steam, Lutris, Wine, Winetricks, GameMode, and MangoHud.
--   **Graphics Drivers:** Installs Vulkan and Mesa userspace drivers. Automatically detects and installs the latest proprietary NVIDIA drivers if an NVIDIA GPU is present.
--   **Hardware Support:** Installs the latest CPU microcode for AMD or Intel processors.
--   **System Utilities:** Sets up Flatpak with the Flathub repository, enables TRIM for SSDs, and installs firmware update tools.
--   **Developer Tools:** A curated selection of lightweight tools including Git, build-essential, Neovim, tmux, Python, Node.js, and more.
--   **Laptop Power Management:** Installs `power-profiles-daemon` and creates simple command-line scripts (`power-performance`, `power-balanced`, `power-battery`) to easily switch between power modes.
--   **Lightweight Tuning:** Applies minor system tunables for improved desktop responsiveness (`vm.swappiness`, `vm.vfs_cache_pressure`).
+## 📋 Table of Contents
 
-## Usage
+- [Features](#-features)
+- [System Requirements](#-system-requirements)
+- [Installation](#-installation)
+- [What Gets Installed](#-what-gets-installed)
+- [Post-Installation](#-post-installation)
+- [Troubleshooting](#-troubleshooting)
+- [Uninstalling](#-uninstalling)
+- [Contributing](#-contributing)
+- [License](#-license)
 
-To run the setup script, clone this repository and execute `install.sh`.
+## ⚙️ Features
+
+### Gaming & Performance
+- **Gaming Platforms:** Steam, Lutris, Wine, Winetricks for running Windows games on Linux
+- **Performance Tools:** GameMode (automatic CPU/GPU optimization) and MangoHud (in-game performance monitoring)
+- **Graphics Stack:** Vulkan and Mesa drivers for optimal gaming performance
+
+### Hardware Support
+- **GPU Detection:** Automatically detects and installs the latest proprietary NVIDIA drivers
+- **CPU Optimization:** Installs the latest microcode updates for both AMD and Intel processors
+- **Storage Optimization:** Enables TRIM for SSDs to maintain drive performance over time
+- **Firmware Updates:** Installs tools for keeping system firmware up-to-date
+
+### Development Environment
+- **Version Control:** Git with common configurations
+- **Build Tools:** build-essential, compiler chains, and development headers
+- **Editors & Tools:** Neovim, tmux, and other developer essentials
+- **Languages:** Python, Node.js, and npm pre-installed and ready
+- **Package Management:** Flatpak integration with Flathub for easy app installation
+
+### Power Management (Laptop-Friendly)
+- **Power Profiles Daemon:** Intelligent power management with easy-to-use CLI commands
+- **Quick Power Switching:** Commands to instantly switch between performance, balanced, and battery-saving modes
+- **Smart Defaults:** Optimized system tunables for desktop responsiveness
+
+## 📦 System Requirements
+
+- **OS:** Ubuntu 22.04 LTS or later (including Ubuntu 24.04)
+- **RAM:** Minimum 4GB (8GB+ recommended for gaming)
+- **Disk Space:** ~10GB free space
+- **Internet Connection:** Required for package downloads
+- **Sudo Access:** Script requires administrator privileges
+
+## 🚀 Installation
+
+### Method 1: Recommended (Direct Clone & Execute)
 
 ```bash
 git clone https://github.com/cybat13/Ubuntu-start.git
@@ -24,58 +64,259 @@ chmod +x install.sh
 ./install.sh
 ```
 
-The script will ask for your password to install packages and configure the system using `sudo`.
+### Method 2: One-Liner (Use with Caution)
 
-## What This Script Does
-
-The script automates the following setup steps:
-
-1.  **System Update:** Updates package lists and upgrades all installed packages to their latest versions.
-2.  **Enable 32-bit Architecture:** Adds `i386` architecture support, which is required by Steam and many games.
-3.  **Install Hardware Drivers:**
-    -   Detects your CPU (AMD/Intel) and installs the relevant microcode package.
-    -   Detects your GPU vendor and automatically installs the recommended proprietary NVIDIA driver if applicable.
-    -   Installs core Mesa and Vulkan libraries for graphics rendering.
-4.  **Install Gaming Software:** Installs Steam, Lutris, GameMode, and MangoHud from the standard Ubuntu repositories.
-5.  **Install Development & System Tools:** Installs a base set of tools for software development and system administration.
-6.  **Configure System Services & Settings:**
-    -   Adds the Flathub remote for Flatpak.
-    -   Enables and starts `fstrim.timer` if an SSD is detected to maintain drive performance.
-    -   Applies lightweight system settings via `sysctl`.
-    -   Enables `power-profiles-daemon` and creates helper scripts in `~/.local/bin` for easy power management.
-7.  **System Cleanup:** Removes unnecessary packages and cleans the package cache.
-
-## Post-Installation
-
-After the script completes, a system reboot is highly recommended to ensure all changes take effect.
-
-### Power Mode Helpers
-
-For laptops, you can easily switch power profiles from the terminal:
-
--   `power-performance` - For maximum performance while gaming (best when plugged in).
--   `power-balanced` - For normal daily use.
--   `power-battery` - To save energy when on battery power.
-
-To check the current active profile, run:
 ```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/cybat13/Ubuntu-start/main/install.sh)
+```
+
+**What Happens Next:**
+1. The script will display what it intends to install
+2. You'll be prompted for your sudo password
+3. Installation proceeds automatically (takes 10-20 minutes depending on internet speed)
+4. After completion, a system reboot is **highly recommended**
+
+## 📥 What Gets Installed
+
+### 1. System Foundation
+- Updates all existing packages to latest versions
+- Enables 32-bit architecture support (required by Steam and many games)
+- Configures system repositories and package sources
+
+### 2. Hardware Drivers
+- **CPU:** AMD microcode or Intel microcode (auto-detected)
+- **GPU:** 
+  - Mesa libraries (universal graphics support)
+  - Vulkan drivers (modern graphics API)
+  - Proprietary NVIDIA drivers (if NVIDIA GPU detected)
+- **Firmware:** LVFS integration for hardware firmware updates
+
+### 3. Gaming Suite
+| Component | Purpose |
+|-----------|---------|
+| **Steam** | Official Linux gaming platform |
+| **Lutris** | Game management and compatibility layer |
+| **Wine** | Windows application compatibility |
+| **Winetricks** | Dependency installer for Wine |
+| **GameMode** | Automatic CPU/GPU optimization during gaming |
+| **MangoHud** | In-game performance overlay (FPS, temps, CPU/GPU usage) |
+
+### 4. Development Tools
+```
+Git • build-essential • Python 3 • Node.js & npm • Neovim
+tmux • curl • wget • htop • nano • vim • gcc • g++ • make
+```
+
+### 5. System Utilities
+- **Flatpak:** Container-based app distribution (Flathub repository)
+- **Firmware Tools:** fwupd for BIOS/firmware updates
+- **SSD Management:** fstrim for TRIM support
+- **System Monitor:** Tools for performance analysis
+
+### 6. System Optimizations
+- SSD TRIM enabled via `fstrim.timer`
+- Swappiness reduced for better responsiveness
+- VFS cache pressure tuned for desktop workloads
+- Unnecessary packages cleaned up
+
+## 🔧 Post-Installation
+
+### ⚡ Power Management (Laptops)
+
+After installation, use these commands to manage power profiles:
+
+```bash
+# Switch to maximum performance (best for gaming, needs AC power)
+power-performance
+
+# Balanced mode (normal daily use)
+power-balanced
+
+# Battery saver mode (extends battery life)
+power-battery
+
+# Check current active profile
 powerprofilesctl get
 ```
-**Note:** `~/.local/bin` must be in your shell's `PATH`. If the commands don't work, add the following line to your `~/.bashrc` or `~/.zshrc`:
+
+**If commands don't work:**
+Ensure `~/.local/bin` is in your PATH by adding this to `~/.bashrc` or `~/.zshrc`:
+
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-### Recommended Steam Launch Options
+Then restart your terminal.
 
-For the best experience, use the following launch options for your games in Steam to enable MangoHud and GameMode:
+### 🎮 Gaming Optimization
+
+#### Steam Launch Options
+For the best gaming experience with performance monitoring and auto-optimization, set these launch options in Steam:
+
+1. Right-click game → Properties → Launch Options
+2. Add: `mangohud gamemoderun %command%`
+
+This enables:
+- **GameMode:** Automatic CPU/GPU prioritization
+- **MangoHud:** Real-time performance metrics overlay
+
+#### Recommended Graphics Settings
+- **Resolution:** Match your monitor's native resolution
+- **GPU Driver:** Use "Vulkan" when available in game settings
+- **VRAM:** Set to match your GPU's VRAM (check with `glxinfo | grep "VRAM"`)
+
+### ✅ Verify Installation
+
+Test that key components are working correctly:
+
+```bash
+# Test GameMode is active
+gamemoded -t
+
+# Check Vulkan support
+vulkaninfo | head -20
+
+# Verify Steam installation
+steam --version
+
+# Check GPU drivers
+glxinfo | grep "OpenGL version"
+
+# Test power profiles
+powerprofilesctl profiles
+
+# Monitor system resources
+htop
 ```
-mangohud gamemoderun %command%
+
+## 🐛 Troubleshooting
+
+### Script Won't Run
+**Error:** `Permission denied` when running `./install.sh`
+
+**Solution:**
+```bash
+chmod +x install.sh
+./install.sh
 ```
 
-### Testing the Setup
+### Steam Won't Start
+**Error:** Steam crashes or won't launch
 
-You can verify that the key components are working with these commands:
+**Solution:**
+1. Clear Steam cache: `rm -rf ~/.steam/ubuntu12_32`
+2. Reinstall Steam runtime: `steam --help` (will trigger automatic fix)
+3. Enable 32-bit support: `sudo dpkg --add-architecture i386 && sudo apt update`
 
--   **Test GameMode:** `gamemoded -t`
--   **Test Vulkan:** `vulkaninfo | less`
+### Games Won't Run / Poor Performance
+**Issue:** Games crash or run slowly
+
+**Troubleshooting Steps:**
+1. Verify Vulkan is working: `vulkaninfo | grep "apiVersion"`
+2. Check GPU drivers: `glxinfo | grep "Device"`
+3. Monitor temps: `watch -n 1 "gpustat"` (requires `gpustat` package)
+4. Test with a simple game first (e.g., Portal 2)
+5. Check game compatibility at [ProtonDB](https://protondb.com)
+
+### Vulkan Not Working
+**Solution:**
+```bash
+sudo apt reinstall libvulkan1 vulkan-tools vulkan-icd-loader
+```
+
+### Power Commands Not Found
+**Issue:** `power-performance`, `power-balanced`, `power-battery` commands don't exist
+
+**Solution:**
+```bash
+# Check if scripts were created
+ls -la ~/.local/bin/power-*
+
+# If missing, add PATH and run:
+mkdir -p ~/.local/bin
+export PATH="$HOME/.local/bin:$PATH"
+
+# Manually create the scripts:
+echo 'powerprofilesctl set performance' > ~/.local/bin/power-performance
+echo 'powerprofilesctl set balanced' > ~/.local/bin/power-balanced
+echo 'powerprofilesctl set power-saver' > ~/.local/bin/power-battery
+chmod +x ~/.local/bin/power-*
+```
+
+### NVIDIA Drivers Issues
+**Issue:** NVIDIA drivers didn't install or aren't working
+
+**Solution:**
+```bash
+# Remove broken drivers
+sudo apt remove nvidia-* 
+
+# Reinstall latest drivers
+sudo apt install nvidia-driver-latest-dkms
+
+# Verify installation
+nvidia-smi
+```
+
+## 🗑️ Uninstalling / Reverting Changes
+
+If you need to revert to a clean Ubuntu installation:
+
+```bash
+# Remove all installed packages (this is extensive)
+sudo apt autoremove --purge steam lutris wine winetricks gamemode mangohud
+
+# Disable Flatpak
+sudo systemctl disable flatpak
+sudo apt remove flatpak
+
+# Remove power management scripts
+rm -rf ~/.local/bin/power-*
+
+# Optional: Revert sysctl changes
+sudo sysctl -w vm.swappiness=60
+sudo sysctl -w vm.vfs_cache_pressure=100
+```
+
+## 🤝 Contributing
+
+Contributions are welcome! Please feel free to:
+
+- Report bugs or issues
+- Suggest new features or tools
+- Improve documentation
+- Submit pull requests
+
+## 📄 License
+
+This project is licensed under the MIT License - see the LICENSE file for details.
+
+## 💡 Tips & Tricks
+
+### Getting the Best Gaming Performance
+1. **Use performance power profile** when gaming: `power-performance`
+2. **Enable MangoHud** to monitor performance: `mangohud gamemoderun %command%`
+3. **Close background apps** to free up system resources
+4. **Use Vulkan** renderer in games when available
+5. **Monitor temperatures** with: `watch -n 1 "nvidia-smi"`
+
+### For Development
+- Use Neovim with plugins for a lightweight editor: `nvim ~/.bashrc`
+- Create tmux sessions for organized workflows: `tmux new-session -s work`
+- Install additional tools via Flatpak: `flatpak install flathub [APP_ID]`
+
+### SSD Health
+```bash
+# Check SSD TRIM status
+sudo fstrim -v /
+
+# Monitor SSD health
+sudo apt install nvme-cli
+sudo nvme smart-log /dev/nvme0n1
+```
+
+---
+
+**Last Updated:** 2026-03-17
+
+For issues, questions, or feature requests, please open an [issue on GitHub](https://github.com/cybat13/Ubuntu-start/issues).
